@@ -19,7 +19,7 @@ try {
 // Flag to track if Google Sheets is initialized
 let isGoogleSheetsInitialized = false;
 
-// Default questions array
+// Default questions array with corrected question mark placement
 let questions = [
     { question: 'האם אתה תומך בהצעה להאריך את שעות הפעילות של המרכז הקהילתי?', description: '', active: true },
     { question: 'האם אתה בעד הקמת גינה קהילתית חדשה בשכונה?', description: '', active: true }
@@ -33,7 +33,9 @@ app.use(cors());
 app.use(express.json());
 
 // Serve static files from the voting-app directory
-app.use(express.static(path.join(__dirname, '..', 'voting-app')));
+app.use(express.static(path.join(__dirname, '..', 'voting-app'), {
+    index: false // Prevent serving index.html by default
+}));
 
 // Function to initialize Google Sheets with detailed logging
 async function initializeGoogleSheets() {
@@ -96,8 +98,13 @@ async function loadQuestions() {
                 return hasQuestion;
             })
             .map(row => {
+                let questionText = row.get('question');
+                // Fix question mark placement
+                if (questionText.startsWith('?')) {
+                    questionText = questionText.substring(1).trim() + '?';
+                }
                 const question = {
-                    question: row.get('question'),
+                    question: questionText,
                     description: row.get('description') || '',
                     active: row.get('active') === 'TRUE'
                 };
@@ -265,9 +272,18 @@ app.get('/api/results/csv', async (req, res) => {
     }
 });
 
-// Default route to serve login.html
+// Serve login.html as the default route
 app.get('/', (req, res) => {
     res.sendFile(path.join(__dirname, '..', 'voting-app', 'login.html'));
+});
+
+// Serve other HTML files explicitly
+app.get('/index.html', (req, res) => {
+    res.sendFile(path.join(__dirname, '..', 'voting-app', 'index.html'));
+});
+
+app.get('/results.html', (req, res) => {
+    res.sendFile(path.join(__dirname, '..', 'voting-app', 'results.html'));
 });
 
 app.listen(port, () => {
