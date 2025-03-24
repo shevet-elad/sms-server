@@ -1,157 +1,139 @@
-require('dotenv').config();
 const express = require('express');
-const twilio = require('twilio');
-const cors = require('cors');
-const { google } = require('googleapis');
-
+const { GoogleSpreadsheet } = require('google-spreadsheet');
 const app = express();
+const port = 3000;
+
+// הגדרות ל-Google Sheets (אם אתה משתמש בזה)
+const doc = new GoogleSpreadsheet('YOUR_SPREADSHEET_ID');
+const creds = require('./path-to-your-credentials.json');
+
+// מערך זמני של שאלות ברירת מחדל
+let questions = [
+    { question: 'האם אתה תומך בהצעה להאריך את שעות הפעילות של המרכז הקהילתי?', description: '', active: true },
+    { question: 'האם אתה בעד הקמת גינה קהילתית חדשה בשכונה?', description: '', active: true }
+];
+
 app.use(express.json());
-app.use(cors());
+app.use(express.static('public'));
 
-// Twilio credentials
-const accountSid = process.env.TWILIO_ACCOUNT_SID;
-const authToken = process.env.TWILIO_AUTH_TOKEN;
-const verifyServiceSid = process.env.TWILIO_VERIFY_SERVICE_SID;
-const client = twilio(accountSid, authToken);
+// טעינת שאלות מ-Google Sheets (אם אתה משתמש בזה)
+async function loadQuestions() {
+    try {
+        await doc.useServiceAccountAuth(creds);
+        await doc.loadInfo();
+        const sheet = doc.sheetsByIndex[0];
+        const rows = await sheet.getRows();
+        questions = rows.map(row => ({
+            question: row.question,
+            description: row.description || '',
+            active: row.active === 'TRUE'
+        }));
 
-// Google Sheets API setup
-const auth = new google.auth.GoogleAuth({
-  credentials: JSON.parse(process.env.GOOGLE_CREDENTIALS),
-  scopes: ['https://www.googleapis.com/auth/spreadsheets'],
-});
-
-const sheets = google.sheets({ version: 'v4', auth });
-const spreadsheetId = '1Smej-ifRXVpPqJZZs9StraoupZ_XaKdmcoDttL42Ino'; // Your Google Sheet ID
-
-// Function to get the first sheet title
-async function getFirstSheetTitle() {
-  try {
-    const metadata = await sheets.spreadsheets.get({
-      spreadsheetId,
-    });
-    return metadata.data.sheets[0].properties.title;
-  } catch (error) {
-    console.error('Error getting sheet title:', error.message, error.stack);
-    throw error;
-  }
+        // אם אין שאלות ב-Google Sheets, השתמש בשאלות ברירת המחדל
+        if (questions.length === 0) {
+            await sheet.addRows(questions);
+        }
+    } catch (error) {
+        console.error('Error loading questions from Google Sheets:', error);
+        // במקרה של שגיאה, השתמש בשאלות ברירת המחדל
+    }
 }
 
-// Endpoint to send SMS verification code using Twilio Verify
-app.post('/send-sms', async (req, res) => {
-  const { to } = req.body;
-  console.log('Request to send SMS (server): Received number:', to);
+// טען שאלות בעת הפעלת השרת
+loadQuestions();
 
-  // Ensure the phone number is in international format
-  let formattedTo = to;
-  if (!formattedTo.startsWith('+')) {
-    formattedTo = '+972' + formattedTo.replace(/^0/, '');
-  }
-
-  console.log('Number after formatting:', formattedTo);
-
-  try {
-    const verification = await client.verify.v2
-      .services(verifyServiceSid)
-      .verifications.create({ to: formattedTo, channel: 'sms' });
-    console.log('Response from Twilio (SMS sending):', verification);
-    res.json(verification);
-  } catch (error) {
-    console.error('Error sending SMS (server):', error.message, error.code, error);
-    res.status(500).json({ error: error.message, code: error.code });
-  }
+// API לקבלת שאלות
+app.get('/api/questions', (req, res) => {
+    res.json(questions);
 });
 
-// Endpoint to verify the SMS code using Twilio Verify
-app.post('/verify-sms', async (req, res) => {
-  const { to, code } = req.body;
-  console.log('Request to verify code (server):', { to, code, verifyServiceSid });
-
-  // Ensure the phone number is in international format
-  let formattedTo = to;
-  if (!formattedTo.startsWith('+')) {
-    formattedTo = '+972' + formattedTo.replace(/^0/, '');
-  }
-
-  try {
-    const verificationCheck = await client.verify.v2
-      .services(verifyServiceSid)
-      .verificationChecks.create({ to: formattedTo, code: code });
-    console.log('Response from Twilio (code verification):', verificationCheck);
-    res.json(verificationCheck);
-  } catch (error) {
-    console.error('Error verifying code (server):', error.message, error.code, error);
-    res.status(500).json({ error: error.message, code: error.code });
-  }
-});
-
-// Endpoint to save voting data to Google Sheet dynamically
-app.post('/save-vote', async (req, res) => {
-  const { phoneNumber, answers } = req.body;
-  console.log('Request to save vote:', { phoneNumber, answers });
-
-  // Validate the input data
-  if (!phoneNumber || !answers || !Array.isArray(answers) || answers.length === 0) {
-    console.error('Missing or invalid data:', { phoneNumber, answers });
-    return res.status(400).json({ error: 'Missing or invalid data' });
-  }
-
-  try {
-    const sheetTitle = await getFirstSheetTitle();
-    const range = `${sheetTitle}!A${answers.length + 1}:B${answers.length + 1}`; // Dynamic range based on number of answers
-    const values = [[phoneNumber, ...answers]];
-
-    const response = await sheets.spreadsheets.values.append({
-      spreadsheetId,
-      range: range,
-      valueInputOption: 'RAW',
-      resource: { values },
-    });
-
-    console.log('Vote data saved successfully to Google Sheet:', response.data);
-    res.status(200).json({ message: 'Vote data saved successfully' });
-  } catch (error) {
-    console.error('Error saving data to Google Sheet:', error.message, error.stack);
-    res.status(500).json({ error: 'Error saving vote data' });
-  }
-});
-
-// Endpoint to manage questions (admin functionality)
-app.post('/manage-questions', async (req, res) => {
-  const { action, question } = req.body;
-  console.log('Request to manage questions:', { action, question });
-
-  try {
-    const sheetTitle = await getFirstSheetTitle();
-    const getRows = await sheets.spreadsheets.values.get({
-      spreadsheetId,
-      range: `${sheetTitle}!A:A`,
-    });
-    const currentQuestions = getRows.data.values ? getRows.data.values.slice(1) : [];
-
-    let updatedQuestions;
-    if (action === 'add' && question) {
-      updatedQuestions = [...currentQuestions, question];
-    } else if (action === 'remove' && currentQuestions.length > 0) {
-      updatedQuestions = currentQuestions.slice(0, -1);
-    } else {
-      return res.status(400).json({ error: 'Invalid action or no question provided' });
+// API לשמירת שאלות
+app.post('/api/questions', async (req, res) => {
+    const newQuestion = req.body;
+    questions.push(newQuestion);
+    try {
+        const sheet = doc.sheetsByIndex[0];
+        await sheet.addRow(newQuestion);
+        res.json({ success: true });
+    } catch (error) {
+        console.error('Error saving question:', error);
+        res.json({ success: false });
     }
-
-    const values = [['Question'], ...updatedQuestions.map(q => [q])];
-    await sheets.spreadsheets.values.update({
-      spreadsheetId,
-      range: `${sheetTitle}!A:A`,
-      valueInputOption: 'RAW',
-      resource: { values },
-    });
-
-    console.log('Questions updated successfully');
-    res.status(200).json({ message: 'Questions updated successfully', questions: updatedQuestions });
-  } catch (error) {
-    console.error('Error managing questions:', error.message, error.stack);
-    res.status(500).json({ error: 'Error managing questions' });
-  }
 });
 
-const port = process.env.PORT || 3000;
-app.listen(port, () => console.log(`Server running on port ${port}`));
+// API לעדכון שאלות
+app.post('/api/questions/update', async (req, res) => {
+    questions = req.body;
+    try {
+        const sheet = doc.sheetsByIndex[0];
+        await sheet.clear();
+        await sheet.setHeaderRow(['question', 'description', 'active']);
+        await sheet.addRows(questions.map(q => ({ ...q, active: q.active.toString() })));
+        res.json({ success: true });
+    } catch (error) {
+        console.error('Error updating questions:', error);
+        res.json({ success: false });
+    }
+});
+
+// API לשליחת הצבעה
+app.post('/api/vote', async (req, res) => {
+    const { phoneNumber, answers } = req.body;
+    try {
+        const sheet = doc.sheetsByIndex[1]; // גיליון להצבעות
+        for (let i = 0; i < answers.length; i++) {
+            await sheet.addRow({
+                phoneNumber,
+                question: questions[i].question,
+                answer: answers[i],
+                timestamp: new Date().toISOString()
+            });
+        }
+        res.json({ success: true });
+    } catch (error) {
+        console.error('Error saving vote:', error);
+        res.json({ success: false });
+    }
+});
+
+// API לקבלת תוצאות
+app.get('/api/results', async (req, res) => {
+    try {
+        const sheet = doc.sheetsByIndex[1];
+        const rows = await sheet.getRows();
+        const results = questions.map(q => {
+            const votes = rows.filter(row => row.question === q.question);
+            return {
+                question: q.question,
+                for: votes.filter(v => v.answer === 'בעד').length,
+                against: votes.filter(v => v.answer === 'נגד').length
+            };
+        });
+        res.json(results);
+    } catch (error) {
+        console.error('Error fetching results:', error);
+        res.json([]);
+    }
+});
+
+// API להורדת תוצאות כ-CSV
+app.get('/api/results/csv', async (req, res) => {
+    try {
+        const sheet = doc.sheetsByIndex[1];
+        const rows = await sheet.getRows();
+        const csv = ['phoneNumber,question,answer,timestamp'];
+        rows.forEach(row => {
+            csv.push(`${row.phoneNumber},${row.question},${row.answer},${row.timestamp}`);
+        });
+        res.header('Content-Type', 'text/csv');
+        res.attachment('voting-results.csv');
+        res.send(csv.join('\n'));
+    } catch (error) {
+        console.error('Error generating CSV:', error);
+        res.status(500).send('Error generating CSV');
+    }
+});
+
+app.listen(port, () => {
+    console.log(`Server running on port ${port}`);
+});
