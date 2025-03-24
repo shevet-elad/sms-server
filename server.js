@@ -1,10 +1,13 @@
 const express = require('express');
 const { GoogleSpreadsheet } = require('google-spreadsheet');
+const { JWT } = require('google-auth-library');
+const cors = require('cors');
+const path = require('path');
 const app = express();
 const port = 3000;
 
-// הגדרות ל-Google Sheets (אם אתה משתמש בזה)
-const doc = new GoogleSpreadsheet('YOUR_SPREADSHEET_ID');
+// Google Sheets setup
+const doc = new GoogleSpreadsheet('1Smej-ifRXVpPqJZZs9StraoupZ_XaKdmcoDttL42Ino');
 let creds;
 try {
     creds = require('./credentials.json');
@@ -13,36 +16,104 @@ try {
     creds = null;
 }
 
-// מערך זמני של שאלות ברירת מחדל
+// Flag to track if Google Sheets is initialized
+let isGoogleSheetsInitialized = false;
+
+// Default questions array
 let questions = [
     { question: 'האם אתה תומך בהצעה להאריך את שעות הפעילות של המרכז הקהילתי?', description: '', active: true },
     { question: 'האם אתה בעד הקמת גינה קהילתית חדשה בשכונה?', description: '', active: true }
 ];
 
-app.use(express.json());
-app.use(express.static('public'));
+// Temporary array to store votes if Google Sheets is unavailable
+let localVotes = [];
 
-// טעינת שאלות מ-Google Sheets
-async function loadQuestions() {
+// Middleware setup
+app.use(cors());
+app.use(express.json());
+
+// Serve static files from the voting-app directory
+app.use(express.static(path.join(__dirname, '..', 'voting-app')));
+
+// Function to initialize Google Sheets with detailed logging
+async function initializeGoogleSheets() {
     if (!creds) {
-        console.log('No credentials found, using default questions.');
+        console.log('No credentials found. Please ensure credentials.json exists and is valid.');
+        return false;
+    }
+
+    try {
+        const auth = new JWT({
+            email: creds.client_email,
+            key: creds.private_key,
+            scopes: [
+                'https://www.googleapis.com/auth/spreadsheets',
+                'https://www.googleapis.com/auth/drive.file',
+            ],
+        });
+
+        doc.auth = auth;
+
+        console.log('Authenticating with Google Sheets...');
+        await doc.loadInfo();
+        console.log('Google Sheets initialized successfully. Spreadsheet title:', doc.title);
+        return true;
+    } catch (error) {
+        console.error('Error initializing Google Sheets:');
+        console.error('Error message:', error.message);
+        if (error.response) {
+            console.error('Error response:', error.response.data);
+        }
+        return false;
+    }
+}
+
+// Load questions from Google Sheets
+async function loadQuestions() {
+    isGoogleSheetsInitialized = await initializeGoogleSheets();
+
+    if (!isGoogleSheetsInitialized) {
+        console.log('Using default questions due to Google Sheets initialization failure.');
         return;
     }
 
     try {
-        await doc.useServiceAccountAuth(creds);
-        await doc.loadInfo();
         const sheet = doc.sheetsByIndex[0];
-        const rows = await sheet.getRows();
-        questions = rows.map(row => ({
-            question: row.question,
-            description: row.description || '',
-            active: row.active === 'TRUE'
-        }));
+        console.log('Loading questions from sheet:', sheet.title);
 
-        // אם אין שאלות ב-Google Sheets, השתמש בשאלות ברירת המחדל
-        if (questions.length === 0) {
-            console.log('No questions found in Google Sheets, adding default questions.');
+        await sheet.loadHeaderRow();
+        console.log('Header values:', sheet.headerValues);
+
+        const rows = await sheet.getRows();
+        console.log('Raw rows from Google Sheets:', rows);
+
+        const loadedQuestions = rows
+            .filter(row => {
+                const hasQuestion = row.get('question') && row.get('question').trim() !== '';
+                if (!hasQuestion) {
+                    console.log('Skipping row due to missing or empty question:', row);
+                }
+                return hasQuestion;
+            })
+            .map(row => {
+                const question = {
+                    question: row.get('question'),
+                    description: row.get('description') || '',
+                    active: row.get('active') === 'TRUE'
+                };
+                console.log('Processed question:', question);
+                return question;
+            });
+
+        if (loadedQuestions.length > 0) {
+            questions = loadedQuestions;
+            console.log('Loaded questions from Google Sheets:', questions);
+        } else {
+            console.log('No valid questions found in Google Sheets, using default questions.');
+        }
+
+        if (rows.length === 0) {
+            console.log('No rows found in Google Sheets, adding default questions.');
             await sheet.addRows(questions);
         }
     } catch (error) {
@@ -51,92 +122,140 @@ async function loadQuestions() {
     }
 }
 
-// טען שאלות בעת הפעלת השרת
+// Load questions when the server starts
 loadQuestions();
 
-// API לקבלת שאלות
+// API to get questions
 app.get('/api/questions', (req, res) => {
+    console.log('Sending questions to client:', questions);
     res.json(questions);
 });
 
-// API לשמירת שאלות
-app.post('/api/questions', async (req, res) => {
-    const newQuestion = req.body;
-    questions.push(newQuestion);
-    try {
-        const sheet = doc.sheetsByIndex[0];
-        await sheet.addRow(newQuestion);
-        res.json({ success: true });
-    } catch (error) {
-        console.error('Error saving question:', error.message);
-        res.json({ success: true }); // ממשיך לעבוד עם המערך הזמני
-    }
-});
-
-// API לעדכון שאלות
-app.post('/api/questions/update', async (req, res) => {
-    questions = req.body;
-    try {
-        const sheet = doc.sheetsByIndex[0];
-        await sheet.clear();
-        await sheet.setHeaderRow(['question', 'description', 'active']);
-        await sheet.addRows(questions.map(q => ({ ...q, active: q.active.toString() })));
-        res.json({ success: true });
-    } catch (error) {
-        console.error('Error updating questions:', error.message);
-        res.json({ success: true }); // ממשיך לעבוד עם המערך הזמני
-    }
-});
-
-// API לשליחת הצבעה
+// API to submit a vote
 app.post('/api/vote', async (req, res) => {
     const { phoneNumber, answers } = req.body;
-    try {
-        const sheet = doc.sheetsByIndex[1]; // גיליון להצבעות
-        for (let i = 0; i < answers.length; i++) {
-            await sheet.addRow({
-                phoneNumber,
-                question: questions[i].question,
-                answer: answers[i],
-                timestamp: new Date().toISOString()
+
+    const voteData = {
+        phoneNumber,
+        timestamp: new Date().toISOString()
+    };
+
+    questions.forEach((q, i) => {
+        voteData[`question_${i + 1}`] = q.question;
+        voteData[`answer_${i + 1}`] = answers[i] || 'לא נענה';
+    });
+
+    localVotes.push(voteData);
+
+    if (isGoogleSheetsInitialized) {
+        try {
+            const sheet = doc.sheetsByIndex[1];
+
+            const headers = ['phoneNumber', 'timestamp'];
+            questions.forEach((_, i) => {
+                headers.push(`question_${i + 1}`, `answer_${i + 1}`);
             });
+            await sheet.setHeaderRow(headers);
+
+            await sheet.addRow(voteData);
+            res.json({ success: true });
+        } catch (error) {
+            console.error('Error saving vote to Google Sheets:', error.message);
+            res.json({ success: true });
         }
+    } else {
+        console.log('Google Sheets not initialized, saving vote locally.');
         res.json({ success: true });
-    } catch (error) {
-        console.error('Error saving vote:', error.message);
-        res.json({ success: false });
     }
 });
 
-// API לקבלת תוצאות
+// API to get voting results
 app.get('/api/results', async (req, res) => {
+    let votes = localVotes;
+
+    if (isGoogleSheetsInitialized) {
+        try {
+            const sheet = doc.sheetsByIndex[1];
+            const rows = await sheet.getRows();
+            votes = rows.map(row => {
+                const vote = {
+                    phoneNumber: row.get('phoneNumber'),
+                    timestamp: row.get('timestamp')
+                };
+                questions.forEach((_, i) => {
+                    vote[`question_${i + 1}`] = row.get(`question_${i + 1}`);
+                    vote[`answer_${i + 1}`] = row.get(`answer_${i + 1}`);
+                });
+                return vote;
+            });
+        } catch (error) {
+            console.error('Error fetching votes from Google Sheets:', error.message);
+            console.log('Falling back to local votes.');
+        }
+    }
+
     try {
-        const sheet = doc.sheetsByIndex[1];
-        const rows = await sheet.getRows();
-        const results = questions.map(q => {
-            const votes = rows.filter(row => row.question === q.question);
+        const results = questions.map((q, i) => {
+            const questionKey = `question_${i + 1}`;
+            const answerKey = `answer_${i + 1}`;
+            const questionVotes = votes.filter(v => v[questionKey] === q.question);
             return {
                 question: q.question,
-                for: votes.filter(v => v.answer === 'בעד').length,
-                against: votes.filter(v => v.answer === 'נגד').length
+                for: questionVotes.filter(v => v[answerKey] === 'בעד').length,
+                against: questionVotes.filter(v => v[answerKey] === 'נגד').length
             };
         });
         res.json(results);
     } catch (error) {
-        console.error('Error fetching results:', error.message);
+        console.error('Error calculating results:', error.message);
         res.json([]);
     }
 });
 
-// API להורדת תוצאות כ-CSV
+// API to download results as CSV
 app.get('/api/results/csv', async (req, res) => {
+    let votes = localVotes;
+
+    if (isGoogleSheetsInitialized) {
+        try {
+            const sheet = doc.sheetsByIndex[1];
+            const rows = await sheet.getRows();
+            votes = rows.map(row => {
+                const vote = {
+                    phoneNumber: row.get('phoneNumber'),
+                    timestamp: row.get('timestamp')
+                };
+                questions.forEach((_, i) => {
+                    vote[`question_${i + 1}`] = row.get(`question_${i + 1}`);
+                    vote[`answer_${i + 1}`] = row.get(`answer_${i + 1}`);
+                });
+                return vote;
+            });
+        } catch (error) {
+            console.error('Error fetching votes for CSV:', error.message);
+            console.log('Falling back to local votes.');
+        }
+    }
+
     try {
-        const sheet = doc.sheetsByIndex[1];
-        const rows = await sheet.getRows();
-        const csv = ['phoneNumber,question,answer,timestamp'];
-        rows.forEach(row => {
-            csv.push(`${row.phoneNumber},${row.question},${row.answer},${row.timestamp}`);
+        const headers = ['phoneNumber', 'timestamp'];
+        questions.forEach((_, i) => {
+            headers.push(`question_${i + 1}`, `answer_${i + 1}`);
         });
+        const csv = [headers.join(',')];
+
+        votes.forEach(vote => {
+            const row = [
+                vote.phoneNumber,
+                vote.timestamp,
+                ...questions.flatMap((_, i) => [
+                    vote[`question_${i + 1}`],
+                    vote[`answer_${i + 1}`]
+                ])
+            ];
+            csv.push(row.join(','));
+        });
+
         res.header('Content-Type', 'text/csv');
         res.attachment('voting-results.csv');
         res.send(csv.join('\n'));
@@ -144,6 +263,11 @@ app.get('/api/results/csv', async (req, res) => {
         console.error('Error generating CSV:', error.message);
         res.status(500).send('Error generating CSV');
     }
+});
+
+// Default route to serve login.html
+app.get('/', (req, res) => {
+    res.sendFile(path.join(__dirname, '..', 'voting-app', 'login.html'));
 });
 
 app.listen(port, () => {
