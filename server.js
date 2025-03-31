@@ -3,6 +3,9 @@ const { GoogleSpreadsheet } = require('google-spreadsheet');
 const { JWT } = require('google-auth-library');
 const cors = require('cors');
 const path = require('path');
+const twilio = require('twilio'); // Added for Twilio
+require('dotenv').config(); // Already exists, needed for Twilio credentials
+
 const app = express();
 const port = 3000;
 
@@ -15,6 +18,12 @@ try {
     console.error('Error loading credentials.json:', error.message);
     creds = null;
 }
+
+// Twilio credentials from .env
+const accountSid = process.env.TWILIO_ACCOUNT_SID;
+const authToken = process.env.TWILIO_AUTH_TOKEN;
+const verifyServiceSid = process.env.TWILIO_VERIFY_SERVICE_SID;
+const client = twilio(accountSid, authToken);
 
 // Flag to track if Google Sheets is initialized
 let isGoogleSheetsInitialized = false;
@@ -269,6 +278,52 @@ app.get('/api/results/csv', async (req, res) => {
     } catch (error) {
         console.error('Error generating CSV:', error.message);
         res.status(500).send('Error generating CSV');
+    }
+});
+
+// Send SMS verification code using Twilio Verify
+app.post('/send-sms', async (req, res) => {
+    const { to } = req.body;
+    console.log('Request to send SMS (server): Received number:', to);
+
+    let formattedTo = to;
+    if (!formattedTo.startsWith('+')) {
+        formattedTo = '+972' + formattedTo.replace(/^0/, '');
+    }
+
+    console.log('Number after formatting:', formattedTo);
+
+    try {
+        const verification = await client.verify.v2
+            .services(verifyServiceSid)
+            .verifications.create({ to: formattedTo, channel: 'sms' });
+        console.log('Response from Twilio (SMS sending):', verification);
+        res.json(verification);
+    } catch (error) {
+        console.error('Error sending SMS (server):', error.message, error.code, error);
+        res.status(500).json({ error: error.message, code: error.code });
+    }
+});
+
+// Verify SMS code using Twilio Verify
+app.post('/verify-sms', async (req, res) => {
+    const { to, code } = req.body;
+    console.log('Request to verify code (server):', { to, code, verifyServiceSid });
+
+    let formattedTo = to;
+    if (!formattedTo.startsWith('+')) {
+        formattedTo = '+972' + formattedTo.replace(/^0/, '');
+    }
+
+    try {
+        const verificationCheck = await client.verify.v2
+            .services(verifyServiceSid)
+            .verificationChecks.create({ to: formattedTo, code: code });
+        console.log('Response from Twilio (code verification):', verificationCheck);
+        res.json(verificationCheck);
+    } catch (error) {
+        console.error('Error verifying code (server):', error.message, error.code, error);
+        res.status(500).json({ error: error.message, code: error.code });
     }
 });
 
