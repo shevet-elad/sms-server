@@ -7,7 +7,7 @@ const twilio = require('twilio');
 require('dotenv').config();
 
 const app = express();
-const port = process.env.PORT || 3000; // שימוש ב-port של Render או 3000 מקומית
+const port = process.env.PORT || 3000;
 
 // Google Sheets setup
 const doc = new GoogleSpreadsheet('1Smej-ifRXVpPqJZZs9StraoupZ_XaKdmcoDttL42Ino');
@@ -37,9 +37,21 @@ let questions = [
 // Temporary array to store votes if Google Sheets is unavailable
 let localVotes = [];
 
-// Middleware setup
+// Dynamic CORS configuration to allow specific origins
+const allowedOrigins = [
+    'https://sprightly-stroopwafel-3e67aa.netlify.app', // Netlify production
+    'http://localhost:3000' // Local development
+];
+
 app.use(cors({
-    origin: 'https://sprightly-stroopwafel-3e67aa.netlify.app' // הגבלת CORS ל-Netlify
+    origin: (origin, callback) => {
+        // Allow requests with no origin (like direct server requests) or from allowed origins
+        if (!origin || allowedOrigins.includes(origin)) {
+            callback(null, true);
+        } else {
+            callback(new Error('Not allowed by CORS'));
+        }
+    }
 }));
 app.use(express.json());
 
@@ -184,7 +196,7 @@ app.post('/api/vote', async (req, res) => {
             res.json({ success: true });
         } catch (error) {
             console.error('Error saving vote to Google Sheets:', error.message);
-            res.json({ success: true }); // עדיין מחזיר הצלחה כי השמירה המקומית עבדה
+            res.json({ success: true }); // Still return success as vote is saved locally
         }
     } else {
         console.log('Google Sheets not initialized, saving vote locally.');
@@ -344,9 +356,9 @@ app.post('/verify-sms', async (req, res) => {
     }
 });
 
-// Serve login.html as the default route
+// Serve index.html as the default route
 app.get('/', (req, res) => {
-    res.sendFile(path.join(__dirname, '..', 'voting-app', 'login.html'));
+    res.sendFile(path.join(__dirname, '..', 'voting-app', 'index.html'));
 });
 
 // Serve other HTML files explicitly
