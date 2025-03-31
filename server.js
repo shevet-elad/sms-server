@@ -3,11 +3,11 @@ const { GoogleSpreadsheet } = require('google-spreadsheet');
 const { JWT } = require('google-auth-library');
 const cors = require('cors');
 const path = require('path');
-const twilio = require('twilio'); // Added for Twilio
-require('dotenv').config(); // Already exists, needed for Twilio credentials
+const twilio = require('twilio');
+require('dotenv').config();
 
 const app = express();
-const port = 3000;
+const port = process.env.PORT || 3000; // שימוש ב-port של Render או 3000 מקומית
 
 // Google Sheets setup
 const doc = new GoogleSpreadsheet('1Smej-ifRXVpPqJZZs9StraoupZ_XaKdmcoDttL42Ino');
@@ -38,7 +38,9 @@ let questions = [
 let localVotes = [];
 
 // Middleware setup
-app.use(cors());
+app.use(cors({
+    origin: 'https://sprightly-stroopwafel-3e67aa.netlify.app' // הגבלת CORS ל-Netlify
+}));
 app.use(express.json());
 
 // Serve static files from the voting-app directory
@@ -151,6 +153,11 @@ app.get('/api/questions', (req, res) => {
 app.post('/api/vote', async (req, res) => {
     const { phoneNumber, answers } = req.body;
 
+    if (!phoneNumber || !answers) {
+        console.error('Invalid vote data:', req.body);
+        return res.status(400).json({ success: false, error: 'Missing phoneNumber or answers' });
+    }
+
     const voteData = {
         phoneNumber,
         timestamp: new Date().toISOString()
@@ -177,7 +184,7 @@ app.post('/api/vote', async (req, res) => {
             res.json({ success: true });
         } catch (error) {
             console.error('Error saving vote to Google Sheets:', error.message);
-            res.json({ success: true });
+            res.json({ success: true }); // עדיין מחזיר הצלחה כי השמירה המקומית עבדה
         }
     } else {
         console.log('Google Sheets not initialized, saving vote locally.');
@@ -224,7 +231,7 @@ app.get('/api/results', async (req, res) => {
         res.json(results);
     } catch (error) {
         console.error('Error calculating results:', error.message);
-        res.json([]);
+        res.status(500).json([]);
     }
 });
 
@@ -286,6 +293,11 @@ app.post('/send-sms', async (req, res) => {
     const { to } = req.body;
     console.log('Request to send SMS (server): Received number:', to);
 
+    if (!to) {
+        console.error('No phone number provided');
+        return res.status(400).json({ error: 'Phone number is required' });
+    }
+
     let formattedTo = to;
     if (!formattedTo.startsWith('+')) {
         formattedTo = '+972' + formattedTo.replace(/^0/, '');
@@ -309,6 +321,11 @@ app.post('/send-sms', async (req, res) => {
 app.post('/verify-sms', async (req, res) => {
     const { to, code } = req.body;
     console.log('Request to verify code (server):', { to, code, verifyServiceSid });
+
+    if (!to || !code) {
+        console.error('Missing to or code in request:', req.body);
+        return res.status(400).json({ error: 'Phone number and code are required' });
+    }
 
     let formattedTo = to;
     if (!formattedTo.startsWith('+')) {
